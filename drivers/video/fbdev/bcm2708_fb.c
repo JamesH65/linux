@@ -92,23 +92,29 @@ struct bcm2708_fb {
 	void __iomem *dma_chan_base;
 	void *cb_base;		/* DMA control blocks */
 	dma_addr_t cb_handle;
-	struct dentry *debugfs_dir;
+   struct dentry *debugfs_dir;
+   struct dentry *debugfs_subdir;
 	wait_queue_head_t dma_waitq;
 	struct bcm2708_fb_stats stats;
 	unsigned long fb_bus_address;
 	struct { u32 base, length; } gpu;
+	int display_num;
 };
 
 #define to_bcm2708(info)	container_of(info, struct bcm2708_fb, fb)
 
 static void bcm2708_fb_debugfs_deinit(struct bcm2708_fb *fb)
 {
-	debugfs_remove_recursive(fb->debugfs_dir);
-	fb->debugfs_dir = NULL;
+	debugfs_remove_recursive(fb->debugfs_subdir);
+	fb->debugfs_subdir = NULL;
+
+	// TODO : Need to remove the main dir if this is the last entry. reference count?
+
 }
 
 static int bcm2708_fb_debugfs_init(struct bcm2708_fb *fb)
 {
+   char buf[2];
 	static struct debugfs_reg32 stats_registers[] = {
 		{
 			"dma_copies",
@@ -120,23 +126,43 @@ static int bcm2708_fb_debugfs_init(struct bcm2708_fb *fb)
 		},
 	};
 
-	fb->debugfs_dir = debugfs_create_dir(DRIVER_NAME, NULL);
+	fb->debugfs_dir = debugfs_lookup(DRIVER_NAME, NULL);
+
+	if (!fb->debugfs_dir)
+	   fb->debugfs_dir = debugfs_create_dir(DRIVER_NAME, NULL);
+
 	if (!fb->debugfs_dir) {
-		pr_warn("%s: could not create debugfs entry\n",
+		pr_warn("%s: could not create debugfs folder\n",
 			__func__);
 		return -EFAULT;
 	}
+
+	snprintf(buf, sizeof(buf), "%d", fb->display_num);
+
+	fb->debugfs_subdir = debugfs_create_dir(buf, NULL);
+
+	if (!fb->debugfs_subdir) {
+      pr_warn("%s: could not create debugfs entry %d\n",
+         __func__, fb->display_num);
+      return -EFAULT;
+   }
 
 	fb->stats.regset.regs = stats_registers;
 	fb->stats.regset.nregs = ARRAY_SIZE(stats_registers);
 	fb->stats.regset.base = &fb->stats;
 
 	if (!debugfs_create_regset32(
-		"stats", 0444, fb->debugfs_dir, &fb->stats.regset)) {
+		"stats", 0444, fb->debugfs_subdir, &fb->stats.regset)) {
 		pr_warn("%s: could not create statistics registers\n",
 			__func__);
 		goto fail;
 	}
+
+   if (!debugfs_create_u32("width", 0444, fb->debugfs_subdir, &fb->fb.var.width))
+      goto fail;
+   if (!debugfs_create_u32("height", 0444, fb->debugfs_subdir, &fb->fb.var.height))
+      goto fail;
+
 	return 0;
 
 fail:
@@ -597,8 +623,9 @@ static void bcm2708_fb_copyarea(struct fb_info *info,
 	int burst_size = (fb->dma_chan == 0) ? 8 : 2;
 	int pixels = region->width * region->height;
 
+	// TODO : jnah Dont use DMA for the moment on anything other that first FB
 	/* Fallback to cfb_copyarea() if we don't like something */
-	if (in_atomic() ||
+	if (fb->display_num || in_atomic() ||
 	    bytes_per_pixel > 4 ||
 	    info->var.xres * info->var.yres > 1920 * 1200 ||
 	    region->width <= 0 || region->width > info->var.xres ||
@@ -809,7 +836,8 @@ static int bcm2708_fb_probe(struct platform_device *dev)
 	struct device_node *fw_np;
 	struct rpi_firmware *fw;
 	struct bcm2708_fb *fb;
-	int ret;
+	int ret, i;
+	u32 num_displays;
 
 	fw_np = of_parse_phandle(dev->dev.of_node, "firmware", 0);
 /* Remove comment when booting without Device Tree is no longer supported
@@ -822,59 +850,67 @@ static int bcm2708_fb_probe(struct platform_device *dev)
 	if (!fw)
 		return -EPROBE_DEFER;
 
-	fb = kzalloc(sizeof(struct bcm2708_fb), GFP_KERNEL);
-	if (!fb) {
-		dev_err(&dev->dev,
-			"could not allocate new bcm2708_fb struct\n");
-		ret = -ENOMEM;
-		goto free_region;
-	}
+   ret = rpi_firmware_property(fw, RPI_FIRMWARE_FRAMEBUFFER_GET_NUMBER,
+                               &num_displays, sizeof(u32));
 
-	fb->fw = fw;
-	bcm2708_fb_debugfs_init(fb);
+	for (i = 0; i < num_displays; i++)
+	{
+      fb = kzalloc(sizeof(struct bcm2708_fb), GFP_KERNEL);
+      if (!fb) {
+         dev_err(&dev->dev,
+            "could not allocate new bcm2708_fb struct\n");
+         ret = -ENOMEM;
+         goto free_region;
+      }
 
-	fb->cb_base = dma_alloc_writecombine(&dev->dev, SZ_64K,
-					     &fb->cb_handle, GFP_KERNEL);
-	if (!fb->cb_base) {
-		dev_err(&dev->dev, "cannot allocate DMA CBs\n");
-		ret = -ENOMEM;
-		goto free_fb;
-	}
+      fb->fw = fw;
+      bcm2708_fb_debugfs_init(fb);
 
-	pr_info("BCM2708FB: allocated DMA memory %08x\n",
-	       fb->cb_handle);
+      fb->display_num = i;
 
-	ret = bcm_dma_chan_alloc(BCM_DMA_FEATURE_BULK,
-				 &fb->dma_chan_base, &fb->dma_irq);
-	if (ret < 0) {
-		dev_err(&dev->dev, "couldn't allocate a DMA channel\n");
-		goto free_cb;
-	}
-	fb->dma_chan = ret;
+      fb->cb_base = dma_alloc_writecombine(&dev->dev, SZ_64K,
+                       &fb->cb_handle, GFP_KERNEL);
+      if (!fb->cb_base) {
+         dev_err(&dev->dev, "cannot allocate DMA CBs\n");
+         ret = -ENOMEM;
+         goto free_fb;
+      }
 
-	ret = request_irq(fb->dma_irq, bcm2708_fb_dma_irq,
-			  0, "bcm2708_fb dma", fb);
-	if (ret) {
-		pr_err("%s: failed to request DMA irq\n", __func__);
-		goto free_dma_chan;
-	}
+      pr_info("BCM2708FB: allocated DMA memory %08x\n",
+             fb->cb_handle);
+
+      ret = bcm_dma_chan_alloc(BCM_DMA_FEATURE_BULK,
+                &fb->dma_chan_base, &fb->dma_irq);
+      if (ret < 0) {
+         dev_err(&dev->dev, "couldn't allocate a DMA channel\n");
+         goto free_cb;
+      }
+      fb->dma_chan = ret;
+
+      ret = request_irq(fb->dma_irq, bcm2708_fb_dma_irq,
+              0, "bcm2708_fb dma", fb);
+      if (ret) {
+         pr_err("%s: failed to request DMA irq\n", __func__);
+         goto free_dma_chan;
+      }
 
 
-	pr_info("BCM2708FB: allocated DMA channel %d @ %p\n",
-	       fb->dma_chan, fb->dma_chan_base);
+      pr_info("BCM2708FB: allocated DMA channel %d @ %p\n",
+             fb->dma_chan, fb->dma_chan_base);
 
-	fb->dev = dev;
-	fb->fb.device = &dev->dev;
+      fb->dev = dev;
+      fb->fb.device = &dev->dev;
 
-	// failure here isn't fatal, but we'll fail in vc_mem_copy if fb->gpu is not valid
-	rpi_firmware_property(fb->fw,
-				    RPI_FIRMWARE_GET_VC_MEMORY,
-				    &fb->gpu, sizeof(fb->gpu));
+      // failure here isn't fatal, but we'll fail in vc_mem_copy if fb->gpu is not valid
+      rpi_firmware_property(fb->fw,
+                   RPI_FIRMWARE_GET_VC_MEMORY,
+                   &fb->gpu, sizeof(fb->gpu));
 
-	ret = bcm2708_fb_register(fb);
-	if (ret == 0) {
-		platform_set_drvdata(dev, fb);
-		goto out;
+      ret = bcm2708_fb_register(fb);
+      if (ret == 0) {
+         platform_set_drvdata(dev, fb);
+         goto out;
+      }
 	}
 
 free_dma_chan:
