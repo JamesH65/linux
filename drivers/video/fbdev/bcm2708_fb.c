@@ -2,6 +2,7 @@
  *  linux/drivers/video/bcm2708_fb.c
  *
  * Copyright (C) 2010 Broadcom
+ * Copyright (C) 2018 Raspberry Pi (Trading) Ltd
  *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file COPYING in the main directory of this archive
@@ -61,6 +62,8 @@ module_param(dma_busy_wait_threshold, int, 0644);
 MODULE_PARM_DESC(dma_busy_wait_threshold, "Busy-wait for DMA completion below this area");
 
 struct fb_alloc_tags {
+	struct rpi_firmware_property_tag_header tag0;
+	u32 display_num;
 	struct rpi_firmware_property_tag_header tag1;
 	u32 xres, yres;
 	struct rpi_firmware_property_tag_header tag2;
@@ -81,6 +84,20 @@ struct bcm2708_fb_stats {
 	u32 dma_irqs;
 };
 
+struct vc4_display_settings_t
+{
+	u32 display_num;
+	u32 width;
+	u32 height;
+	u32 pitch;
+	u32 depth;
+	u32 virtual_width;
+	u32 virtual_height;
+	u32 virtual_width_offset;
+	u32 virtual_height_offset;
+	unsigned long fb_bus_address;
+};
+
 struct bcm2708_fb {
 	struct fb_info fb;
 	struct platform_device *dev;
@@ -92,13 +109,13 @@ struct bcm2708_fb {
 	void __iomem *dma_chan_base;
 	void *cb_base;		/* DMA control blocks */
 	dma_addr_t cb_handle;
-   struct dentry *debugfs_dir;
-   struct dentry *debugfs_subdir;
+	struct dentry *debugfs_dir;
+	struct dentry *debugfs_subdir;
 	wait_queue_head_t dma_waitq;
 	struct bcm2708_fb_stats stats;
 	unsigned long fb_bus_address;
 	struct { u32 base, length; } gpu;
-	int display_num;
+	struct vc4_display_settings_t display_settings;
 };
 
 #define to_bcm2708(info)	container_of(info, struct bcm2708_fb, fb)
@@ -114,7 +131,8 @@ static void bcm2708_fb_debugfs_deinit(struct bcm2708_fb *fb)
 
 static int bcm2708_fb_debugfs_init(struct bcm2708_fb *fb)
 {
-   char buf[2];
+char buf[3];
+
 	static struct debugfs_reg32 stats_registers[] = {
 		{
 			"dma_copies",
@@ -129,7 +147,7 @@ static int bcm2708_fb_debugfs_init(struct bcm2708_fb *fb)
 	fb->debugfs_dir = debugfs_lookup(DRIVER_NAME, NULL);
 
 	if (!fb->debugfs_dir)
-	   fb->debugfs_dir = debugfs_create_dir(DRIVER_NAME, NULL);
+		fb->debugfs_dir = debugfs_create_dir(DRIVER_NAME, NULL);
 
 	if (!fb->debugfs_dir) {
 		pr_warn("%s: could not create debugfs folder\n",
@@ -137,15 +155,15 @@ static int bcm2708_fb_debugfs_init(struct bcm2708_fb *fb)
 		return -EFAULT;
 	}
 
-	snprintf(buf, sizeof(buf), "%d", fb->display_num);
+	snprintf(buf, sizeof(buf), "%d", fb->display_settings.display_num);
 
 	fb->debugfs_subdir = debugfs_create_dir(buf, NULL);
 
 	if (!fb->debugfs_subdir) {
-      pr_warn("%s: could not create debugfs entry %d\n",
-         __func__, fb->display_num);
-      return -EFAULT;
-   }
+		pr_warn("%s: could not create debugfs entry %d\n",
+			__func__, fb->display_settings.display_num);
+		return -EFAULT;
+	}
 
 	fb->stats.regset.regs = stats_registers;
 	fb->stats.regset.nregs = ARRAY_SIZE(stats_registers);
@@ -158,10 +176,10 @@ static int bcm2708_fb_debugfs_init(struct bcm2708_fb *fb)
 		goto fail;
 	}
 
-   if (!debugfs_create_u32("width", 0444, fb->debugfs_subdir, &fb->fb.var.width))
-      goto fail;
-   if (!debugfs_create_u32("height", 0444, fb->debugfs_subdir, &fb->fb.var.height))
-      goto fail;
+	if (!debugfs_create_u32("width", 0444, fb->debugfs_subdir, &fb->fb.var.width))
+		goto fail;
+	if (!debugfs_create_u32("height", 0444, fb->debugfs_subdir, &fb->fb.var.height))
+		goto fail;
 
 	return 0;
 
@@ -260,7 +278,7 @@ static int bcm2708_fb_check_var(struct fb_var_screeninfo *var,
 
 	if (bcm2708_fb_set_bitfields(var) != 0) {
 		pr_err("bcm2708_fb_check_var: invalid bits_per_pixel %d\n",
-		     var->bits_per_pixel);
+		var->bits_per_pixel);
 		return -EINVAL;
 	}
 
@@ -272,8 +290,8 @@ static int bcm2708_fb_check_var(struct fb_var_screeninfo *var,
 		var->yres_virtual = 480;
 
 		pr_err
-		    ("bcm2708_fb_check_var: virtual resolution set to maximum of %dx%d\n",
-		     var->xres_virtual, var->yres_virtual);
+		("bcm2708_fb_check_var: virtual resolution set to maximum of %dx%d\n",
+		var->xres_virtual, var->yres_virtual);
 	}
 	if (var->yres_virtual < var->yres)
 		var->yres_virtual = var->yres;
@@ -296,12 +314,15 @@ static int bcm2708_fb_set_par(struct fb_info *info)
 {
 	struct bcm2708_fb *fb = to_bcm2708(info);
 	struct fb_alloc_tags fbinfo = {
+		.tag0 = { RPI_FIRMWARE_FRAMEBUFFER_SET_DISPLAY_NUM,
+			4, 0},
+			.display_num = fb->display_settings.display_num,
 		.tag1 = { RPI_FIRMWARE_FRAMEBUFFER_SET_PHYSICAL_WIDTH_HEIGHT,
-			  8, 0, },
+			8, 0, },
 			.xres = info->var.xres,
 			.yres = info->var.yres,
 		.tag2 = { RPI_FIRMWARE_FRAMEBUFFER_SET_VIRTUAL_WIDTH_HEIGHT,
-			  8, 0, },
+			8, 0, },
 			.xres_virtual = info->var.xres_virtual,
 			.yres_virtual = info->var.yres_virtual,
 		.tag3 = { RPI_FIRMWARE_FRAMEBUFFER_SET_DEPTH, 4, 0 },
@@ -352,11 +373,10 @@ static int bcm2708_fb_set_par(struct fb_info *info)
 		return -ENOMEM;
 	}
 
-	print_debug
-	    ("BCM2708FB: start = %p,%p width=%d, height=%d, bpp=%d, pitch=%d size=%d\n",
-	     (void *)fb->fb.screen_base, (void *)fb->fb_bus_address,
-	     fbinfo.xres, fbinfo.yres, fbinfo.bpp,
-	     fbinfo.pitch, (int)fb->fb.screen_size);
+	print_debug("BCM2708FB: start = %p,%p width=%d, height=%d, bpp=%d, pitch=%d size=%d\n",
+			(void *)fb->fb.screen_base, (void *)fb->fb_bus_address,
+			fbinfo.xres, fbinfo.yres, fbinfo.bpp,
+			fbinfo.pitch, (int)fb->fb.screen_size);
 
 	return 0;
 }
@@ -380,8 +400,8 @@ static int bcm2708_fb_setcolreg(unsigned int regno, unsigned int red,
 		if (regno < 256) {
 			/* blue [23:16], green [15:8], red [7:0] */
 			fb->gpu_cmap[regno] = ((red   >> 8) & 0xff) << 0 |
-					      ((green >> 8) & 0xff) << 8 |
-					      ((blue  >> 8) & 0xff) << 16;
+					((green >> 8) & 0xff) << 8 |
+					((blue  >> 8) & 0xff) << 16;
 		}
 		/* Hack: we need to tell GPU the palette has changed, but currently bcm2708_fb_set_par takes noticable time when called for every (256) colour */
 		/* So just call it for what looks like the last colour in a list for now. */
@@ -400,17 +420,17 @@ static int bcm2708_fb_setcolreg(unsigned int regno, unsigned int red,
 			packet->length = regno + 1;
 			memcpy(packet->cmap, fb->gpu_cmap, sizeof(packet->cmap));
 			ret = rpi_firmware_property(fb->fw, RPI_FIRMWARE_FRAMEBUFFER_SET_PALETTE,
-						    packet, (2 + packet->length) * sizeof(u32));
+						packet, (2 + packet->length) * sizeof(u32));
 			if (ret || packet->offset)
 				dev_err(info->device, "Failed to set palette (%d,%u)\n",
 					ret, packet->offset);
 			kfree(packet);
 		}
-        } else if (regno < 16) {
+	} else if (regno < 16) {
 		fb->cmap[regno] = convert_bitfield(transp, &fb->fb.var.transp) |
-		    convert_bitfield(blue, &fb->fb.var.blue) |
-		    convert_bitfield(green, &fb->fb.var.green) |
-		    convert_bitfield(red, &fb->fb.var.red);
+		convert_bitfield(blue, &fb->fb.var.blue) |
+		convert_bitfield(green, &fb->fb.var.green) |
+		convert_bitfield(red, &fb->fb.var.red);
 	}
 	return regno > 255;
 }
@@ -436,7 +456,7 @@ static int bcm2708_fb_blank(int blank_mode, struct fb_info *info)
 	}
 
 	ret = rpi_firmware_property(fb->fw, RPI_FIRMWARE_FRAMEBUFFER_BLANK,
-				    &value, sizeof(value));
+				&value, sizeof(value));
 	if (ret)
 		dev_err(info->device, "bcm2708_fb_blank(%d) failed: %d\n",
 			blank_mode, ret);
@@ -461,8 +481,8 @@ static void dma_memcpy(struct bcm2708_fb *fb, dma_addr_t dst, dma_addr_t src, in
 	struct bcm2708_dma_cb *cb = fb->cb_base;
 
 	cb->info = BCM2708_DMA_BURST(burst_size) | BCM2708_DMA_S_WIDTH |
-		   BCM2708_DMA_S_INC | BCM2708_DMA_D_WIDTH |
-		   BCM2708_DMA_D_INC;
+		BCM2708_DMA_S_INC | BCM2708_DMA_D_WIDTH |
+		BCM2708_DMA_D_INC;
 	cb->dst = dst;
 	cb->src = src;
 	cb->length = size;
@@ -510,7 +530,7 @@ static long vc_mem_copy(struct bcm2708_fb *fb, unsigned long arg)
 	/* Get the parameter data.
 	 */
 	if (copy_from_user
-	    (&ioparam, (void *)arg, sizeof(ioparam)) != 0) {
+	(&ioparam, (void *)arg, sizeof(ioparam)) != 0) {
 		pr_err("[%s]: failed to copy-from-user\n",
 				__func__);
 		rc = -EFAULT;
@@ -528,7 +548,7 @@ static long vc_mem_copy(struct bcm2708_fb *fb, unsigned long arg)
 	}
 
 	buf = dma_alloc_coherent(fb->fb.device, PAGE_ALIGN(size), &bus_addr,
-				 GFP_ATOMIC);
+				GFP_ATOMIC);
 	if (!buf) {
 		pr_err("[%s]: failed to dma_alloc_coherent(%d)\n",
 				__func__, size);
@@ -564,8 +584,8 @@ static int bcm2708_ioctl(struct fb_info *info, unsigned int cmd, unsigned long a
 	switch (cmd) {
 	case FBIO_WAITFORVSYNC:
 		ret = rpi_firmware_property(fb->fw,
-					    RPI_FIRMWARE_FRAMEBUFFER_SET_VSYNC,
-					    &dummy, sizeof(dummy));
+					RPI_FIRMWARE_FRAMEBUFFER_SET_VSYNC,
+					&dummy, sizeof(dummy));
 		break;
 	case FBIODMACOPY:
 		ret = vc_mem_copy(fb, arg);
@@ -589,17 +609,17 @@ static void bcm2708_fb_fillrect(struct fb_info *info,
 
 /* A helper function for configuring dma control block */
 static void set_dma_cb(struct bcm2708_dma_cb *cb,
-		       int        burst_size,
-		       dma_addr_t dst,
-		       int        dst_stride,
-		       dma_addr_t src,
-		       int        src_stride,
-		       int        w,
-		       int        h)
+		int        burst_size,
+		dma_addr_t dst,
+		int        dst_stride,
+		dma_addr_t src,
+		int        src_stride,
+		int        w,
+		int        h)
 {
 	cb->info = BCM2708_DMA_BURST(burst_size) | BCM2708_DMA_S_WIDTH |
-		   BCM2708_DMA_S_INC | BCM2708_DMA_D_WIDTH |
-		   BCM2708_DMA_D_INC | BCM2708_DMA_TDMODE;
+		BCM2708_DMA_S_INC | BCM2708_DMA_D_WIDTH |
+		BCM2708_DMA_D_INC | BCM2708_DMA_TDMODE;
 	cb->dst = dst;
 	cb->src = src;
 	/*
@@ -625,19 +645,19 @@ static void bcm2708_fb_copyarea(struct fb_info *info,
 
 	// TODO : jnah Dont use DMA for the moment on anything other that first FB
 	/* Fallback to cfb_copyarea() if we don't like something */
-	if (fb->display_num || in_atomic() ||
-	    bytes_per_pixel > 4 ||
-	    info->var.xres * info->var.yres > 1920 * 1200 ||
-	    region->width <= 0 || region->width > info->var.xres ||
-	    region->height <= 0 || region->height > info->var.yres ||
-	    region->sx < 0 || region->sx >= info->var.xres ||
-	    region->sy < 0 || region->sy >= info->var.yres ||
-	    region->dx < 0 || region->dx >= info->var.xres ||
-	    region->dy < 0 || region->dy >= info->var.yres ||
-	    region->sx + region->width > info->var.xres ||
-	    region->dx + region->width > info->var.xres ||
-	    region->sy + region->height > info->var.yres ||
-	    region->dy + region->height > info->var.yres) {
+	if (fb->display_settings.display_num || in_atomic() ||
+	bytes_per_pixel > 4 ||
+	info->var.xres * info->var.yres > 1920 * 1200 ||
+	region->width <= 0 || region->width > info->var.xres ||
+	region->height <= 0 || region->height > info->var.yres ||
+	region->sx < 0 || region->sx >= info->var.xres ||
+	region->sy < 0 || region->sy >= info->var.yres ||
+	region->dx < 0 || region->dx >= info->var.xres ||
+	region->dy < 0 || region->dy >= info->var.yres ||
+	region->sx + region->width > info->var.xres ||
+	region->dx + region->width > info->var.xres ||
+	region->sy + region->height > info->var.yres ||
+	region->dy + region->height > info->var.yres) {
 		cfb_copyarea(info, region);
 		return;
 	}
@@ -672,15 +692,15 @@ static void bcm2708_fb_copyarea(struct fb_info *info,
 				scanlines_per_cb = region->height - y;
 
 			set_dma_cb(cb, burst_size, scratchbuf, scanline_size,
-				   src, fb->fb.fix.line_length,
-				   scanline_size, scanlines_per_cb);
+				src, fb->fb.fix.line_length,
+				scanline_size, scanlines_per_cb);
 			control_block_pa += sizeof(struct bcm2708_dma_cb);
 			cb->next = control_block_pa;
 			cb++;
 
 			set_dma_cb(cb, burst_size, dst, fb->fb.fix.line_length,
-				   scratchbuf, scanline_size,
-				   scanline_size, scanlines_per_cb);
+				scratchbuf, scanline_size,
+				scanline_size, scanlines_per_cb);
 			control_block_pa += sizeof(struct bcm2708_dma_cb);
 			cb->next = control_block_pa;
 			cb++;
@@ -702,14 +722,14 @@ static void bcm2708_fb_copyarea(struct fb_info *info,
 			stride = -fb->fb.fix.line_length;
 		}
 		set_dma_cb(cb, burst_size,
-			   fb->fb_bus_address + dy * fb->fb.fix.line_length +
-						   bytes_per_pixel * region->dx,
-			   stride,
-			   fb->fb_bus_address + sy * fb->fb.fix.line_length +
-						   bytes_per_pixel * region->sx,
-			   stride,
-			   region->width * bytes_per_pixel,
-			   region->height);
+			fb->fb_bus_address + dy * fb->fb.fix.line_length +
+						bytes_per_pixel * region->dx,
+			stride,
+			fb->fb_bus_address + sy * fb->fb.fix.line_length +
+						bytes_per_pixel * region->sx,
+			stride,
+			region->width * bytes_per_pixel,
+			region->height);
 	}
 
 	/* end of dma control blocks chain */
@@ -734,7 +754,7 @@ static void bcm2708_fb_copyarea(struct fb_info *info,
 }
 
 static void bcm2708_fb_imageblit(struct fb_info *info,
-				 const struct fb_image *image)
+				const struct fb_image *image)
 {
 	/* (is called) print_debug("bcm2708_fb_imageblit\n"); */
 	cfb_imageblit(info, image);
@@ -787,11 +807,24 @@ static int bcm2708_fb_register(struct bcm2708_fb *fb)
 	fb->fb.fix.ywrapstep = 0;
 	fb->fb.fix.accel = FB_ACCEL_NONE;
 
-	fb->fb.var.xres = fbwidth;
-	fb->fb.var.yres = fbheight;
-	fb->fb.var.xres_virtual = fbwidth;
-	fb->fb.var.yres_virtual = fbheight;
-	fb->fb.var.bits_per_pixel = fbdepth;
+	/* If we have data from the VC4 on FB's, use that, otheise use the
+	   module parameters
+	*/
+	if (fb->display_settings.width) {
+		fb->fb.var.xres = fb->display_settings.width;
+		fb->fb.var.yres = fb->display_settings.height;
+		fb->fb.var.xres_virtual = fb->display_settings.virtual_width;
+		fb->fb.var.yres_virtual = fb->display_settings.virtual_height;
+		fb->fb.var.bits_per_pixel = fb->display_settings.depth;
+	}
+	else {
+		fb->fb.var.xres = fbwidth;
+		fb->fb.var.yres = fbheight;
+		fb->fb.var.xres_virtual = fbwidth;
+		fb->fb.var.yres_virtual = fbheight;
+		fb->fb.var.bits_per_pixel = fbdepth;
+	}
+
 	fb->fb.var.vmode = FB_VMODE_NONINTERLACED;
 	fb->fb.var.activate = FB_ACTIVATE_NOW;
 	fb->fb.var.nonstd = 0;
@@ -836,81 +869,99 @@ static int bcm2708_fb_probe(struct platform_device *dev)
 	struct device_node *fw_np;
 	struct rpi_firmware *fw;
 	struct bcm2708_fb *fb;
-	int ret, i;
+	int ret, i, old = 0;
 	u32 num_displays;
 
 	fw_np = of_parse_phandle(dev->dev.of_node, "firmware", 0);
-/* Remove comment when booting without Device Tree is no longer supported
-	if (!fw_np) {
-		dev_err(&dev->dev, "Missing firmware node\n");
-		return -ENOENT;
-	}
-*/
+
 	fw = rpi_firmware_get(fw_np);
 	if (!fw)
 		return -EPROBE_DEFER;
 
-   ret = rpi_firmware_property(fw, RPI_FIRMWARE_FRAMEBUFFER_GET_NUMBER,
-                               &num_displays, sizeof(u32));
+	ret = rpi_firmware_property(fw, RPI_FIRMWARE_FRAMEBUFFER_GET_NUM_DISPLAYS,
+			&num_displays, sizeof(u32));
 
-	for (i = 0; i < num_displays; i++)
-	{
-      fb = kzalloc(sizeof(struct bcm2708_fb), GFP_KERNEL);
-      if (!fb) {
-         dev_err(&dev->dev,
-            "could not allocate new bcm2708_fb struct\n");
-         ret = -ENOMEM;
-         goto free_region;
-      }
+	/* If we fail to get the number of displays, or it returns 0, then
+	 * assume old firmware that doesnt have the mailbox call, so just
+	 * just set one display
+	 */
+	if (ret || num_displays == 0) {
+		num_displays = 1;
+		old = 1;
+		dev_err(&dev->dev,
+			"Unable to determine number of FB's. Assuming 1\n");
+	}
 
-      fb->fw = fw;
-      bcm2708_fb_debugfs_init(fb);
+	for (i = 0; i < num_displays; i++) {
+		fb = kzalloc(sizeof(struct bcm2708_fb), GFP_KERNEL);
+		if (!fb) {
+			dev_err(&dev->dev,
+				"could not allocate new bcm2708_fb struct\n");
+			ret = -ENOMEM;
+			goto free_region;
+		}
 
-      fb->display_num = i;
+		fb->fw = fw;
+		bcm2708_fb_debugfs_init(fb);
 
-      fb->cb_base = dma_alloc_writecombine(&dev->dev, SZ_64K,
-                       &fb->cb_handle, GFP_KERNEL);
-      if (!fb->cb_base) {
-         dev_err(&dev->dev, "cannot allocate DMA CBs\n");
-         ret = -ENOMEM;
-         goto free_fb;
-      }
+		fb->display_settings.display_num = i;
 
-      pr_info("BCM2708FB: allocated DMA memory %08x\n",
-             fb->cb_handle);
+		fb->cb_base = dma_alloc_writecombine(&dev->dev, SZ_64K,
+				&fb->cb_handle, GFP_KERNEL);
+		if (!fb->cb_base) {
+			dev_err(&dev->dev, "cannot allocate DMA CBs\n");
+			ret = -ENOMEM;
+			goto free_fb;
+		}
 
-      ret = bcm_dma_chan_alloc(BCM_DMA_FEATURE_BULK,
-                &fb->dma_chan_base, &fb->dma_irq);
-      if (ret < 0) {
-         dev_err(&dev->dev, "couldn't allocate a DMA channel\n");
-         goto free_cb;
-      }
-      fb->dma_chan = ret;
+		pr_info("BCM2708FB: allocated DMA memory %08x\n",
+			fb->cb_handle);
 
-      ret = request_irq(fb->dma_irq, bcm2708_fb_dma_irq,
-              0, "bcm2708_fb dma", fb);
-      if (ret) {
-         pr_err("%s: failed to request DMA irq\n", __func__);
-         goto free_dma_chan;
-      }
+		ret = bcm_dma_chan_alloc(BCM_DMA_FEATURE_BULK,
+					 &fb->dma_chan_base, &fb->dma_irq);
+		if (ret < 0) {
+			dev_err(&dev->dev, "couldn't allocate a DMA channel\n");
+			goto free_cb;
+		}
+		fb->dma_chan = ret;
 
+		ret = request_irq(fb->dma_irq, bcm2708_fb_dma_irq,
+				  0, "bcm2708_fb dma", fb);
+		if (ret) {
+			pr_err("%s: failed to request DMA irq\n", __func__);
+			goto free_dma_chan;
+		}
 
-      pr_info("BCM2708FB: allocated DMA channel %d @ %p\n",
-             fb->dma_chan, fb->dma_chan_base);
+		pr_info("BCM2708FB: allocated DMA channel %d @ %p\n",
+			fb->dma_chan, fb->dma_chan_base);
 
-      fb->dev = dev;
-      fb->fb.device = &dev->dev;
+		fb->dev = dev;
+		fb->fb.device = &dev->dev;
 
-      // failure here isn't fatal, but we'll fail in vc_mem_copy if fb->gpu is not valid
-      rpi_firmware_property(fb->fw,
-                   RPI_FIRMWARE_GET_VC_MEMORY,
-                   &fb->gpu, sizeof(fb->gpu));
+		/* failure here isn't fatal, but we'll fail in vc_mem_copy
+		 * if fb->gpu is not valid
+		 */
+		rpi_firmware_property(fb->fw,
+				RPI_FIRMWARE_GET_VC_MEMORY,
+				&fb->gpu, sizeof(fb->gpu));
 
-      ret = bcm2708_fb_register(fb);
-      if (ret == 0) {
-         platform_set_drvdata(dev, fb);
-         goto out;
-      }
+		if (old) {
+			memset(&fb->display_settings, 0,
+				sizeof(fb->display_settings) );
+		}
+		else {
+			fb->display_settings.display_num = i;
+			rpi_firmware_property(fb->fw,
+				RPI_FIRMWARE_FRAMEBUFFER_GET_DISPLAY_SETTINGS,
+				&fb->display_settings,
+				sizeof(fb->display_settings));
+		}
+
+		ret = bcm2708_fb_register(fb);
+		if (ret == 0) {
+			platform_set_drvdata(dev, fb);
+			goto out;
+		}
 	}
 
 free_dma_chan:
@@ -957,10 +1008,10 @@ static struct platform_driver bcm2708_fb_driver = {
 	.probe = bcm2708_fb_probe,
 	.remove = bcm2708_fb_remove,
 	.driver = {
-		   .name = DRIVER_NAME,
-		   .owner = THIS_MODULE,
-		   .of_match_table = bcm2708_fb_of_match_table,
-		   },
+		.name = DRIVER_NAME,
+		.owner = THIS_MODULE,
+		.of_match_table = bcm2708_fb_of_match_table,
+		},
 };
 
 static int __init bcm2708_fb_init(void)
