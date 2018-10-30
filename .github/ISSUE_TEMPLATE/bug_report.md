@@ -10,17 +10,17 @@ This repository contains the Linux kernel used on the Raspberry Pi. If you belie
 **Describe the bug**
 A clear and concise description of what you think the bug is.
 
-**To Reproduce**
+**To reproduce**
 Steps required to reproduce the issue.
 
-**Expected behavior**
+**Expected behaviour**
 A clear and concise description of what you expected to happen.
 
 **Actual behaviour**
 A clear and concise description of what actually happened.
 
 **System**
-Please copy and paste the results of the `raspinfo -v` command in to this section, alternatively use a pastebin link, or fill in answers to the following questions.
+Please copy and paste the results of the `raspinfo` command in to this section, alternatively use a pastebin link, or fill in answers to the following questions.
 
 * Which model of Raspberry Pi? e.g. Pi3B+, PiZeroW
 * Which OS and version (`cat /etc/rpi-issue`)?
