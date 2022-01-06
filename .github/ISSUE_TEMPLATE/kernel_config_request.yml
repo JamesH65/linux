@@ -1,5 +1,7 @@
 name: "Kernel Configuration request"
 description: Ask Raspberry Pi to add a specific kernel configuration to the standard Raspberry Pi kernel
+labels: kernel configuration
+assignees: pelwell
 body:
 - type: markdown
   attributes:
