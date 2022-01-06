@@ -10,8 +10,8 @@ body:
     
       * The feature should be of use to the majority of our users
       If not, 
-      ** The feature should not increase the size of the image excessively
-      ** The feature should not impact performance, even on low end devices such as the Pi Zero or Pi1.
+        * The feature should not increase the size of the image excessively
+        * The feature should not impact performance, even on low end devices such as the Pi Zero or Pi1.
     
 - type: textarea
   id: configuration
