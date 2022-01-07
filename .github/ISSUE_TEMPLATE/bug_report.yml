@@ -1,5 +1,7 @@
 name: "Kernel bug report"
 description: Create a report to help us fix your issue
+labels: triage
+assignees: popcornmix
 body:
 - type: markdown
   attributes:
