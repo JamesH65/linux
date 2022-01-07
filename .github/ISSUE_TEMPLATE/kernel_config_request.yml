@@ -10,7 +10,6 @@ body:
       In order for a kernel configuration request to be granted, please consider the following.
     
       * The feature should be of use to the majority of our users
-      
       If not, 
         * The feature should not increase the size of the image excessively
         * The feature should not impact performance, even on low end devices such as the Pi Zero or Pi1.
