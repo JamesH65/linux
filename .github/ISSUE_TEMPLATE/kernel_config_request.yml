@@ -10,6 +10,7 @@ body:
       In order for a kernel configuration request to be granted, please consider the following.
     
       * The feature should be of use to the majority of our users
+      
       If not, 
         * The feature should not increase the size of the image excessively
         * The feature should not impact performance, even on low end devices such as the Pi Zero or Pi1.
@@ -19,7 +20,7 @@ body:
   attributes:
     label: What configuration would you like added?
     description: |
-      Add a clear and concise description of the configuration item, including the define if known.
+      Add a clear and concise description of the configuration item, including the kernel define if known. Please include evidence of module sizes, and any performance implications.
   validations:
     required: true
 
