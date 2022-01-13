@@ -13,7 +13,7 @@ contact_links:
     url: https://github.com/raspberrypi/libcamera-apps/issues
     about: "If you have problems with the Raspberry Pi libcamera applications or the camera software stack, please report them here."
   - name: "⛔ Problems with the Raspberry Pi firmware"
-    url: https://github.com/RPi-Distro/repo
+    url: https://github.com/raspberrypi/firmware/issues
     about: "Firmware would include problems with processor frequency setting, and other low level operations not handled by the Linux kernel"
   - name: "⛔ Problems with the Raspberry Pi documentation"
     url: https://github.com/raspberrypi/documentation/issues
